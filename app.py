@@ -212,13 +212,14 @@ with st.sidebar:
     # 先抓全期資料以取得可用日期範圍（Meta API 最多支援往前 37 個月）
     earliest = date.today() - timedelta(days=37 * 30)
     with st.spinner("載入日期範圍..."):
-        full_df = fetch_meta_insights(earliest.strftime("%Y-%m-%d"), date.today().strftime("%Y-%m-%d"))
+        yesterday = date.today() - timedelta(days=1)
+        full_df = fetch_meta_insights(earliest.strftime("%Y-%m-%d"), yesterday.strftime("%Y-%m-%d"))
 
     if full_df.empty:
         st.stop()
 
     min_date = full_df["date"].min().date()
-    max_date = date.today()
+    max_date = date.today() - timedelta(days=1)
 
     date_range = st.date_input(
         "日期範圍",
