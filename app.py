@@ -192,6 +192,146 @@ def fetch_meta_ad_insights(start_date: str, end_date: str, campaign_id: str = ""
     return df[cols_keep].sort_values("spend", ascending=False)
 
 
+def _safe_apply(df, col, fn):
+    if col in df.columns:
+        df[col] = df[col].apply(fn)
+
+
+def render_creative_block(title, start_str, end_str, campaign_id,
+                          focus="purchase", sheet_leads=None):
+    """渲染單一階段的素材成效（廣告組合彙總 + 個別素材明細）。
+
+    focus="purchase"：強調購買、每筆購買成本（CPA）
+    focus="lead"    ：強調名單、每名單成本（CPL）；若提供 sheet_leads，
+                      上方摘要用 Google Sheet 名單總數計算 CPL
+    """
+    import streamlit as st  # 確保函式內可用
+    st.subheader(title)
+    st.caption(f"日期範圍：{start_str} ~ {end_str}")
+
+    with st.spinner("載入素材成效..."):
+        ad_df = fetch_meta_ad_insights(start_str, end_str, campaign_id=campaign_id)
+
+    if ad_df.empty:
+        st.info("此期間無素材數據")
+        return
+
+    # 前測期摘要：用 Google Sheet 名單總數計算 CPL
+    if focus == "lead" and sheet_leads is not None:
+        blk_spend = float(ad_df["spend"].sum())
+        blk_cpl = (blk_spend / sheet_leads) if sheet_leads > 0 else 0
+        s1, s2, s3 = st.columns(3)
+        s1.metric("名單數（Google Sheet）", f"{int(sheet_leads):,}")
+        s2.metric("廣告花費", f"NT$ {blk_spend:,.0f}")
+        s3.metric("CPL", f"NT$ {blk_cpl:,.0f}" if sheet_leads > 0 else "-")
+        st.caption("註：CPL 用 Google Sheet 名單總數計算；下方各素材的「名單」為 Meta 歸因數，無法對應到 Sheet 單筆名單，僅供素材間比較。")
+
+    cpa_label = "CPA" if focus == "purchase" else "每名單成本"
+
+    # 廣告組合彙總
+    st.markdown("**廣告組合（Ad Set）彙總**")
+    if "adset_name" in ad_df.columns:
+        agg_dict = {
+            "spend":       ("spend", "sum"),
+            "impressions": ("impressions", "sum"),
+            "clicks":      ("clicks", "sum"),
+            "purchases":   ("purchases", "sum"),
+            "leads":       ("leads_action", "sum"),
+            "lp_views":    ("lp_views", "sum"),
+        }
+        if "reach" in ad_df.columns:
+            agg_dict["reach"] = ("reach", "sum")
+        adset_agg = ad_df.groupby(["adset_id", "adset_name"], as_index=False).agg(**agg_dict)
+
+        adset_agg["ctr"] = adset_agg.apply(
+            lambda r: (r["clicks"] / r["impressions"] * 100) if r["impressions"] > 0 else 0, axis=1
+        )
+        adset_agg["cpc"] = adset_agg.apply(
+            lambda r: r["spend"] / r["clicks"] if r["clicks"] > 0 else None, axis=1
+        )
+        if focus == "purchase":
+            adset_agg["cpa"] = adset_agg.apply(
+                lambda r: r["spend"] / r["purchases"] if r["purchases"] > 0 else None, axis=1
+            )
+        else:
+            adset_agg["cpa"] = adset_agg.apply(
+                lambda r: r["spend"] / r["leads"] if r["leads"] > 0 else None, axis=1
+            )
+
+        adset_disp = adset_agg.copy()
+        _safe_apply(adset_disp, "spend",       lambda v: f"NT$ {v:,.0f}")
+        _safe_apply(adset_disp, "impressions", lambda v: f"{int(v):,}")
+        _safe_apply(adset_disp, "clicks",      lambda v: f"{int(v):,}")
+        _safe_apply(adset_disp, "reach",       lambda v: f"{int(v):,}")
+        _safe_apply(adset_disp, "ctr",         lambda v: f"{v:.2f}%")
+        _safe_apply(adset_disp, "cpc",         lambda v: f"NT$ {v:.2f}" if pd.notna(v) else "-")
+        _safe_apply(adset_disp, "cpa",         lambda v: f"NT$ {v:,.0f}" if pd.notna(v) else "-")
+        _safe_apply(adset_disp, "purchases",   lambda v: int(v))
+        _safe_apply(adset_disp, "leads",       lambda v: int(v))
+        _safe_apply(adset_disp, "lp_views",    lambda v: int(v))
+
+        if focus == "purchase":
+            adset_cols_map = {
+                "adset_name": "廣告組合", "spend": "花費", "impressions": "曝光",
+                "reach": "觸及", "clicks": "點擊", "ctr": "CTR", "cpc": "CPC",
+                "lp_views": "到達頁瀏覽", "purchases": "購買", "cpa": cpa_label,
+            }
+        else:
+            adset_cols_map = {
+                "adset_name": "廣告組合", "spend": "花費", "impressions": "曝光",
+                "reach": "觸及", "clicks": "點擊", "ctr": "CTR", "cpc": "CPC",
+                "lp_views": "到達頁瀏覽", "leads": "名單(Meta)", "cpa": cpa_label,
+            }
+        adset_show = [c for c in adset_cols_map if c in adset_disp.columns]
+        adset_disp = adset_disp[adset_show]
+        adset_disp.columns = [adset_cols_map[c] for c in adset_show]
+        st.dataframe(adset_disp, use_container_width=True, hide_index=True)
+
+    # 個別廣告（素材）明細
+    st.markdown("**個別廣告 / 素材明細**")
+    ad_disp = ad_df.copy()
+    if focus == "purchase":
+        _safe_apply(ad_disp, "cpa", lambda v: f"NT$ {v:,.0f}" if pd.notna(v) else "-")
+    else:
+        # 重算每素材 CPL（用 Meta 歸因名單）
+        ad_disp["cpa"] = ad_disp.apply(
+            lambda r: r["spend"] / r["leads_action"] if r.get("leads_action", 0) > 0 else None, axis=1
+        )
+        _safe_apply(ad_disp, "cpa", lambda v: f"NT$ {v:,.0f}" if pd.notna(v) else "-")
+    _safe_apply(ad_disp, "ctr",          lambda v: f"{v:.2f}%")
+    _safe_apply(ad_disp, "spend",        lambda v: f"NT$ {v:,.0f}")
+    _safe_apply(ad_disp, "impressions",  lambda v: f"{int(v):,}")
+    _safe_apply(ad_disp, "clicks",       lambda v: f"{int(v):,}")
+    _safe_apply(ad_disp, "reach",        lambda v: f"{int(v):,}")
+    _safe_apply(ad_disp, "frequency",    lambda v: f"{v:.2f}")
+    _safe_apply(ad_disp, "cpc",          lambda v: f"NT$ {v:.2f}" if v > 0 else "-")
+    _safe_apply(ad_disp, "cpm",          lambda v: f"NT$ {v:.0f}")
+    _safe_apply(ad_disp, "purchases",    int)
+    _safe_apply(ad_disp, "leads_action", int)
+    _safe_apply(ad_disp, "lp_views",     int)
+
+    if focus == "purchase":
+        col_label_map = {
+            "adset_name": "廣告組合", "ad_name": "廣告（素材）",
+            "spend": "花費", "impressions": "曝光", "reach": "觸及",
+            "frequency": "頻率", "clicks": "點擊", "ctr": "CTR",
+            "cpc": "CPC", "cpm": "CPM", "lp_views": "到達頁瀏覽",
+            "purchases": "購買", "cpa": cpa_label,
+        }
+    else:
+        col_label_map = {
+            "adset_name": "廣告組合", "ad_name": "廣告（素材）",
+            "spend": "花費", "impressions": "曝光", "reach": "觸及",
+            "frequency": "頻率", "clicks": "點擊", "ctr": "CTR",
+            "cpc": "CPC", "cpm": "CPM", "lp_views": "到達頁瀏覽",
+            "leads_action": "名單(Meta)", "cpa": cpa_label,
+        }
+    show_cols = [c for c in col_label_map.keys() if c in ad_disp.columns]
+    ad_disp = ad_disp[show_cols]
+    ad_disp.columns = [col_label_map[c] for c in show_cols]
+    st.dataframe(ad_disp, use_container_width=True, hide_index=True)
+
+
 # ── Google Sheet（前測期名單）────────────────────────────────────────────────
 
 def _fetch_csv(url: str, label: str) -> pd.DataFrame:
@@ -427,6 +567,28 @@ with st.sidebar:
     else:
         start = end = date_range
 
+    # 前測期日期範圍（從舊 campaign 抓可選範圍）
+    pretest_end_default = sales_start - timedelta(days=1)
+    _pretest_earliest = pretest_end_default - timedelta(days=37 * 30)
+    with st.spinner("載入前測日期範圍..."):
+        pretest_full = fetch_meta_insights(
+            _pretest_earliest.strftime("%Y-%m-%d"),
+            pretest_end_default.strftime("%Y-%m-%d"),
+            campaign_id=PRETEST_CAMPAIGN_ID,
+        )
+    pretest_min = pretest_full["date"].min().date() if not pretest_full.empty else (pretest_end_default - timedelta(days=30))
+    pre_date_range = st.date_input(
+        "前測期日期範圍",
+        value=(pretest_min, pretest_end_default),
+        min_value=pretest_min,
+        max_value=pretest_end_default,
+        key="pretest_date_range",
+    )
+    if isinstance(pre_date_range, (list, tuple)) and len(pre_date_range) == 2:
+        pre_start, pre_end = pre_date_range
+    else:
+        pre_start = pre_end = pre_date_range
+
     st.divider()
     if st.button("重新整理資料", use_container_width=True):
         st.cache_data.clear()
@@ -474,6 +636,23 @@ with st.sidebar:
 
 start_str = start.strftime("%Y-%m-%d")
 end_str   = end.strftime("%Y-%m-%d")
+pre_start_str = pre_start.strftime("%Y-%m-%d")
+pre_end_str   = pre_end.strftime("%Y-%m-%d")
+
+
+def count_sheet_leads(start_d, end_d) -> int:
+    """計算指定日期範圍內 Google Sheet 的名單數。"""
+    sdf = fetch_sheet_data()
+    if sdf.empty:
+        return 0
+    col = detect_date_column(sdf)
+    if not col:
+        return int(sdf.shape[0])
+    parsed = parse_tw_datetime(sdf[col])
+    mask = (parsed >= pd.Timestamp(start_d)) & \
+           (parsed <= pd.Timestamp(end_d) + pd.Timedelta(days=1) - pd.Timedelta(seconds=1))
+    return int(mask.sum())
+
 
 # ── 頁面路由 ──────────────────────────────────────────────────────────────────
 
@@ -487,94 +666,27 @@ if PAGE_MODE == "admin" and not st.session_state.get("admin_unlocked"):
 
 if PAGE_MODE == "admin":
     st.header("🎨 素材成效（管理員）")
-    st.caption(f"日期範圍：{start_str} ~ {end_str}（在側邊欄調整）")
+    st.caption("兩階段素材分開呈現，日期範圍在側邊欄各自調整")
 
-    with st.spinner("載入素材成效..."):
-        ad_df = fetch_meta_ad_insights(start_str, end_str)
+    # 階段二：集資銷售期素材（用銷售 campaign，重點：購買 / CPA）
+    render_creative_block(
+        "🎯 集資銷售期素材成效",
+        start_str, end_str,
+        campaign_id=CAMPAIGN_ID,
+        focus="purchase",
+    )
 
-    if ad_df.empty:
-        st.info("所選日期範圍內無素材數據")
-    else:
-        def _safe_apply(df, col, fn):
-            if col in df.columns:
-                df[col] = df[col].apply(fn)
+    st.divider()
 
-        # 廣告組合彙總
-        st.subheader("廣告組合（Ad Set）彙總")
-        if "adset_name" in ad_df.columns:
-            agg_dict = {
-                "spend":       ("spend", "sum"),
-                "impressions": ("impressions", "sum"),
-                "clicks":      ("clicks", "sum"),
-                "purchases":   ("purchases", "sum"),
-                "leads":       ("leads_action", "sum"),
-                "lp_views":    ("lp_views", "sum"),
-            }
-            if "reach" in ad_df.columns:
-                agg_dict["reach"] = ("reach", "sum")
-            adset_agg = ad_df.groupby(["adset_id", "adset_name"], as_index=False).agg(**agg_dict)
-
-            adset_agg["ctr"] = adset_agg.apply(
-                lambda r: (r["clicks"] / r["impressions"] * 100) if r["impressions"] > 0 else 0, axis=1
-            )
-            adset_agg["cpc"] = adset_agg.apply(
-                lambda r: r["spend"] / r["clicks"] if r["clicks"] > 0 else None, axis=1
-            )
-            adset_agg["cpa"] = adset_agg.apply(
-                lambda r: r["spend"] / (r["purchases"] if r["purchases"] > 0 else r["leads"])
-                          if (r["purchases"] > 0 or r["leads"] > 0) else None,
-                axis=1,
-            )
-
-            adset_disp = adset_agg.copy()
-            _safe_apply(adset_disp, "spend",       lambda v: f"NT$ {v:,.0f}")
-            _safe_apply(adset_disp, "impressions", lambda v: f"{int(v):,}")
-            _safe_apply(adset_disp, "clicks",      lambda v: f"{int(v):,}")
-            _safe_apply(adset_disp, "reach",       lambda v: f"{int(v):,}")
-            _safe_apply(adset_disp, "ctr",         lambda v: f"{v:.2f}%")
-            _safe_apply(adset_disp, "cpc",         lambda v: f"NT$ {v:.2f}" if pd.notna(v) else "-")
-            _safe_apply(adset_disp, "cpa",         lambda v: f"NT$ {v:,.0f}" if pd.notna(v) else "-")
-            _safe_apply(adset_disp, "purchases",   lambda v: int(v))
-            _safe_apply(adset_disp, "leads",       lambda v: int(v))
-            _safe_apply(adset_disp, "lp_views",    lambda v: int(v))
-
-            adset_cols_map = {
-                "adset_name": "廣告組合", "spend": "花費", "impressions": "曝光",
-                "reach": "觸及", "clicks": "點擊", "ctr": "CTR", "cpc": "CPC",
-                "lp_views": "到達頁瀏覽", "leads": "名單", "purchases": "購買", "cpa": "CPA",
-            }
-            adset_show = [c for c in adset_cols_map if c in adset_disp.columns]
-            adset_disp = adset_disp[adset_show]
-            adset_disp.columns = [adset_cols_map[c] for c in adset_show]
-            st.dataframe(adset_disp, use_container_width=True, hide_index=True)
-
-        # 個別廣告（素材）明細
-        st.subheader("個別廣告 / 素材明細")
-        ad_disp = ad_df.copy()
-        _safe_apply(ad_disp, "ctr",          lambda v: f"{v:.2f}%")
-        _safe_apply(ad_disp, "spend",        lambda v: f"NT$ {v:,.0f}")
-        _safe_apply(ad_disp, "impressions",  lambda v: f"{int(v):,}")
-        _safe_apply(ad_disp, "clicks",       lambda v: f"{int(v):,}")
-        _safe_apply(ad_disp, "reach",        lambda v: f"{int(v):,}")
-        _safe_apply(ad_disp, "frequency",    lambda v: f"{v:.2f}")
-        _safe_apply(ad_disp, "cpc",          lambda v: f"NT$ {v:.2f}" if v > 0 else "-")
-        _safe_apply(ad_disp, "cpm",          lambda v: f"NT$ {v:.0f}")
-        _safe_apply(ad_disp, "cpa",          lambda v: f"NT$ {v:,.0f}" if pd.notna(v) else "-")
-        _safe_apply(ad_disp, "purchases",    int)
-        _safe_apply(ad_disp, "leads_action", int)
-        _safe_apply(ad_disp, "lp_views",     int)
-
-        col_label_map = {
-            "adset_name": "廣告組合", "ad_name": "廣告（素材）",
-            "spend": "花費", "impressions": "曝光", "reach": "觸及",
-            "frequency": "頻率", "clicks": "點擊", "ctr": "CTR",
-            "cpc": "CPC", "cpm": "CPM", "lp_views": "到達頁瀏覽",
-            "leads_action": "名單", "purchases": "購買", "cpa": "CPA",
-        }
-        show_cols = [c for c in col_label_map.keys() if c in ad_disp.columns]
-        ad_disp = ad_disp[show_cols]
-        ad_disp.columns = [col_label_map[c] for c in show_cols]
-        st.dataframe(ad_disp, use_container_width=True, hide_index=True)
+    # 階段一：前測期素材（用前測 campaign，重點：名單 / CPL）
+    pretest_sheet_leads = count_sheet_leads(pre_start, pre_end)
+    render_creative_block(
+        "🎯 前測期素材成效",
+        pre_start_str, pre_end_str,
+        campaign_id=PRETEST_CAMPAIGN_ID,
+        focus="lead",
+        sheet_leads=pretest_sheet_leads,
+    )
 
     st.stop()
 
@@ -789,31 +901,12 @@ else:
 st.divider()
 
 with st.expander(f"📂 前測期數據（{SALES_START_DATE} 前）— 點擊展開", expanded=False):
-    # 前測期：抓舊 campaign 的完整日期範圍以供選擇器使用
-    pretest_end = sales_start - timedelta(days=1)
-    _pretest_earliest = pretest_end - timedelta(days=37 * 30)
-    _pretest_full = fetch_meta_insights(
-        _pretest_earliest.strftime("%Y-%m-%d"),
-        pretest_end.strftime("%Y-%m-%d"),
-        campaign_id=PRETEST_CAMPAIGN_ID,
-    )
-    pretest_start = _pretest_full["date"].min().date() if not _pretest_full.empty else (pretest_end - timedelta(days=30))
-
-    pre_date_range = st.date_input(
-        "前測期日期範圍",
-        value=(pretest_start, pretest_end),
-        min_value=pretest_start,
-        max_value=pretest_end,
-        key="pretest_date_range",
-    )
-    if isinstance(pre_date_range, (list, tuple)) and len(pre_date_range) == 2:
-        pre_start, pre_end = pre_date_range
-    else:
-        pre_start = pre_end = pre_date_range
+    # 日期範圍沿用側邊欄的「前測期日期範圍」
+    st.caption(f"日期範圍：{pre_start_str} ~ {pre_end_str}（在側邊欄調整）")
 
     pre_meta_df = fetch_meta_insights(
-        pre_start.strftime("%Y-%m-%d"),
-        pre_end.strftime("%Y-%m-%d"),
+        pre_start_str,
+        pre_end_str,
         campaign_id=PRETEST_CAMPAIGN_ID,
     )
     pre_sheet_df = fetch_sheet_data()
