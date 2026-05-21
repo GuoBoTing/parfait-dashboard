@@ -21,14 +21,18 @@ def _get_secret(key: str, default: str = "") -> str:
 
 # ── 專案參數（所有欄位皆可透過 env var / secrets.toml 覆寫）──────────────────
 
+# 注意：Meta 數據查詢是「廣告活動層級」（graph.../{CAMPAIGN_ID}/insights），
+#       只用 CAMPAIGN_ID。AD_ACCOUNT_ID 僅供記錄、目前不參與任何 API 呼叫。
+#       開賣換帳號時，真正要做的是讓 META_ACCESS_TOKEN（系統工作人員）有新帳號的「檢視成效」權限，
+#       而不是改這個變數。
 CAMPAIGN_ID    = _get_secret("CAMPAIGN_ID",    "6939598565939")
-AD_ACCOUNT_ID  = _get_secret("AD_ACCOUNT_ID",  "act_111854365566947")
+AD_ACCOUNT_ID  = _get_secret("AD_ACCOUNT_ID",  "act_111854365566947")  # 僅記錄用，未參與查詢
 PAGE_TITLE     = _get_secret("PAGE_TITLE",     "超老闆美業行銷課數據儀表板")
 CAMPAIGN_LABEL = _get_secret("CAMPAIGN_LABEL", "【勿動】超老闆前測問卷_柏廷")
 
 # 前測期專用的 Meta IDs（不設則 fallback 用上面的，方便單一活動的舊報表沿用）
 PRETEST_CAMPAIGN_ID   = _get_secret("PRETEST_CAMPAIGN_ID",   CAMPAIGN_ID)
-PRETEST_AD_ACCOUNT_ID = _get_secret("PRETEST_AD_ACCOUNT_ID", AD_ACCOUNT_ID)
+PRETEST_AD_ACCOUNT_ID = _get_secret("PRETEST_AD_ACCOUNT_ID", AD_ACCOUNT_ID)  # 僅記錄用，未參與查詢
 
 # 銷售期起始日（此日起，主畫面顯示銷售報表，之前的前測數據收進摺疊區塊）
 # 純前測階段不設也沒關係，預設用今天（代表還沒進銷售期）
