@@ -31,11 +31,17 @@ PRETEST_CAMPAIGN_ID   = _get_secret("PRETEST_CAMPAIGN_ID",   CAMPAIGN_ID)
 PRETEST_AD_ACCOUNT_ID = _get_secret("PRETEST_AD_ACCOUNT_ID", AD_ACCOUNT_ID)
 
 # 銷售期起始日（此日起，主畫面顯示銷售報表，之前的前測數據收進摺疊區塊）
-SALES_START_DATE = _get_secret("SALES_START_DATE", "2026-05-15")
+# 純前測階段不設也沒關係，預設用今天（代表還沒進銷售期）
+SALES_START_DATE = _get_secret("SALES_START_DATE", date.today().strftime("%Y-%m-%d"))
 
 # Teachify Admin API
 TEACHIFY_API_KEY = _get_secret("TEACHIFY_API_KEY", "")
 TEACHIFY_GRAPHQL = "https://teachify.io/admin/graphql"
+
+# ── 模式開關 ──────────────────────────────────────────────────────────────────
+# 有設 TEACHIFY_API_KEY → 銷售階段（銷售數據為主、前測收合）
+# 沒設                  → 純前測階段（只顯示名單/CPL 報表）
+SALES_MODE = bool(TEACHIFY_API_KEY)
 
 # SHEET_CSV_URLS：逗號分隔的多個 Google Sheet CSV export URL
 _raw_urls = _get_secret(
@@ -332,6 +338,127 @@ def render_creative_block(title, start_str, end_str, campaign_id,
     st.dataframe(ad_disp, use_container_width=True, hide_index=True)
 
 
+def render_pretest_report(pre_start, pre_end, pre_start_str, pre_end_str):
+    """前測期報表（名單數 / CPL / 每日趨勢 / 每日明細）。
+
+    銷售階段時放在摺疊區塊內；純前測階段時直接當主畫面內容。
+    """
+    st.caption(f"日期範圍：{pre_start_str} ~ {pre_end_str}（在側邊欄調整）")
+
+    pre_meta_df = fetch_meta_insights(pre_start_str, pre_end_str, campaign_id=PRETEST_CAMPAIGN_ID)
+    pre_sheet_df = fetch_sheet_data()
+
+    pre_date_col = detect_date_column(pre_sheet_df) if not pre_sheet_df.empty else None
+    if pre_date_col and not pre_sheet_df.empty:
+        pre_sheet_df[pre_date_col] = parse_tw_datetime(pre_sheet_df[pre_date_col])
+        filtered_sheet = pre_sheet_df[
+            (pre_sheet_df[pre_date_col] >= pd.Timestamp(pre_start)) &
+            (pre_sheet_df[pre_date_col] <= pd.Timestamp(pre_end) + pd.Timedelta(days=1) - pd.Timedelta(seconds=1))
+        ]
+        pre_daily_leads = (
+            filtered_sheet.groupby(filtered_sheet[pre_date_col].dt.normalize())
+            .size().reset_index(name="leads")
+        ).rename(columns={pre_date_col: "date"})[["date", "leads"]]
+        pre_total_leads = int(filtered_sheet.shape[0])
+    else:
+        pre_total_leads = int(pre_sheet_df.shape[0]) if not pre_sheet_df.empty else 0
+        pre_daily_leads = pd.DataFrame()
+
+    pre_total_spend       = pre_meta_df["spend"].sum() if not pre_meta_df.empty else 0.0
+    pre_total_clicks      = int(pre_meta_df["clicks"].sum()) if not pre_meta_df.empty else 0
+    pre_total_impressions = int(pre_meta_df["impressions"].sum()) if not pre_meta_df.empty else 0
+    pre_avg_cpc           = (pre_total_spend / pre_total_clicks) if pre_total_clicks > 0 else 0.0
+    pre_cpl               = (pre_total_spend / pre_total_leads) if pre_total_leads > 0 else 0.0
+
+    p1, p2, p3, p4, p5, p6 = st.columns(6)
+    p1.metric("總花費",     fmt_currency(pre_total_spend))
+    p2.metric("總點擊數",   fmt_number(pre_total_clicks))
+    p3.metric("總曝光數",   fmt_number(pre_total_impressions))
+    p4.metric("平均 CPC",   f"NT$ {pre_avg_cpc:.2f}")
+    p5.metric("前測名單數", fmt_number(pre_total_leads))
+    p6.metric("名單成本",   fmt_currency(pre_cpl))
+
+    if not pre_meta_df.empty:
+        pre_chart = pre_meta_df.copy()
+        if not pre_daily_leads.empty:
+            pre_chart = pre_chart.merge(pre_daily_leads, on="date", how="left")
+            pre_chart["leads"] = pre_chart["leads"].fillna(0).astype(int)
+            pre_chart["cum_spend"] = pre_chart["spend"].cumsum()
+            pre_chart["cum_leads"] = pre_chart["leads"].cumsum()
+            pre_chart["daily_cost_per_lead"] = pre_chart.apply(
+                lambda r: r["cum_spend"] / r["cum_leads"] if r["cum_leads"] > 0 else None, axis=1
+            )
+        else:
+            pre_chart["daily_cost_per_lead"] = None
+
+        pre_fig = go.Figure()
+        pre_fig.add_trace(go.Bar(
+            x=pre_chart["date"], y=pre_chart["spend"],
+            name="每日花費 (NT$)", marker_color="#4C9BE8", yaxis="y1",
+            hovertemplate="%{x|%Y-%m-%d}<br>花費：NT$ %{y:,.0f}<extra></extra>",
+        ))
+        if pre_chart["daily_cost_per_lead"].notna().any():
+            pre_fig.add_trace(go.Scatter(
+                x=pre_chart["date"], y=pre_chart["daily_cost_per_lead"],
+                name="累積名單成本 (NT$)", mode="lines+markers",
+                line=dict(color="#FF6B6B", width=2), marker=dict(size=6), yaxis="y2",
+                hovertemplate="%{x|%Y-%m-%d}<br>名單成本：NT$ %{y:,.0f}<extra></extra>",
+            ))
+        pre_fig.update_layout(
+            xaxis=dict(title="日期", tickformat="%m/%d"),
+            yaxis=dict(title="每日花費 (NT$)", showgrid=False),
+            yaxis2=dict(title="累積名單成本 (NT$)", overlaying="y", side="right", showgrid=False),
+            legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1),
+            hovermode="x unified", height=380,
+            margin=dict(l=0, r=0, t=10, b=0),
+            plot_bgcolor="rgba(0,0,0,0)", paper_bgcolor="rgba(0,0,0,0)",
+        )
+        st.plotly_chart(pre_fig, use_container_width=True)
+
+        # 每日明細表
+        st.markdown("**每日明細**")
+        pre_table = pre_meta_df.copy()
+        if not pre_daily_leads.empty:
+            pre_table = pre_table.merge(pre_daily_leads, on="date", how="left")
+            pre_table["leads"] = pre_table["leads"].fillna(0).astype(int)
+            pre_table["cost_per_lead"] = pre_table.apply(
+                lambda r: r["spend"] / r["leads"] if r["leads"] > 0 else None, axis=1
+            )
+        else:
+            pre_table["leads"] = 0
+            pre_table["cost_per_lead"] = None
+
+        pre_table["date_str"] = pre_table["date"].dt.strftime("%Y-%m-%d")
+
+        pre_totals = {
+            "date_str": "合計",
+            "spend": pre_total_spend,
+            "clicks": pre_total_clicks,
+            "impressions": pre_total_impressions,
+            "cpc": pre_avg_cpc,
+            "leads": pre_total_leads,
+            "cost_per_lead": pre_cpl if pre_total_leads > 0 else None,
+        }
+        pre_display = pd.concat(
+            [pre_table[["date_str", "spend", "clicks", "impressions", "cpc", "leads", "cost_per_lead"]],
+             pd.DataFrame([pre_totals])],
+            ignore_index=True,
+        )
+
+        def _fmt(v, fn):
+            return fn(v) if isinstance(v, (int, float)) and pd.notna(v) else "-"
+
+        pre_display["spend"]         = pre_display["spend"].apply(lambda v: _fmt(v, lambda x: f"NT$ {x:,.0f}"))
+        pre_display["clicks"]        = pre_display["clicks"].apply(lambda v: _fmt(v, lambda x: f"{int(x):,}"))
+        pre_display["impressions"]   = pre_display["impressions"].apply(lambda v: _fmt(v, lambda x: f"{int(x):,}"))
+        pre_display["cpc"]           = pre_display["cpc"].apply(lambda v: _fmt(v, lambda x: f"NT$ {x:.2f}"))
+        pre_display["leads"]         = pre_display["leads"].apply(lambda v: _fmt(v, lambda x: f"{int(x):,}"))
+        pre_display["cost_per_lead"] = pre_display["cost_per_lead"].apply(lambda v: _fmt(v, lambda x: f"NT$ {x:,.0f}"))
+
+        pre_display.columns = ["日期", "花費", "點擊", "曝光", "CPC", "名單數", "名單成本"]
+        st.dataframe(pre_display, use_container_width=True, hide_index=True)
+
+
 # ── Google Sheet（前測期名單）────────────────────────────────────────────────
 
 def _fetch_csv(url: str, label: str) -> pd.DataFrame:
@@ -551,24 +678,27 @@ with st.sidebar:
     with st.spinner("載入日期範圍..."):
         full_df = fetch_meta_insights(earliest.strftime("%Y-%m-%d"), today.strftime("%Y-%m-%d"))
 
-    # 銷售期日期範圍：可選任何日期（含今天），預設從 sales_start 到今天
-    sales_min_pickable = full_df["date"].min().date() if not full_df.empty else (sales_start - timedelta(days=30))
-    sales_default_start = max(sales_start, sales_min_pickable) if sales_start <= today else sales_min_pickable
-
-    date_range = st.date_input(
-        "銷售期日期範圍",
-        value=(sales_default_start, today),
-        min_value=sales_min_pickable,
-        max_value=today,
-    )
-
-    if isinstance(date_range, (list, tuple)) and len(date_range) == 2:
-        start, end = date_range
+    # 銷售期日期範圍：僅在銷售階段顯示
+    if SALES_MODE:
+        sales_min_pickable = full_df["date"].min().date() if not full_df.empty else (sales_start - timedelta(days=30))
+        sales_default_start = max(sales_start, sales_min_pickable) if sales_start <= today else sales_min_pickable
+        date_range = st.date_input(
+            "銷售期日期範圍",
+            value=(sales_default_start, today),
+            min_value=sales_min_pickable,
+            max_value=today,
+        )
+        if isinstance(date_range, (list, tuple)) and len(date_range) == 2:
+            start, end = date_range
+        else:
+            start = end = date_range
     else:
-        start = end = date_range
+        # 純前測階段：銷售日期變數用不到，給預設值避免 NameError
+        start = end = today
 
-    # 前測期日期範圍（從舊 campaign 抓可選範圍）
-    pretest_end_default = sales_start - timedelta(days=1)
+    # 前測期日期範圍
+    # 銷售階段：上限為 sales_start 前一天；純前測階段：上限為今天
+    pretest_end_default = (sales_start - timedelta(days=1)) if SALES_MODE else today
     _pretest_earliest = pretest_end_default - timedelta(days=37 * 30)
     with st.spinner("載入前測日期範圍..."):
         pretest_full = fetch_meta_insights(
@@ -666,17 +796,20 @@ if PAGE_MODE == "admin" and not st.session_state.get("admin_unlocked"):
 
 if PAGE_MODE == "admin":
     st.header("🎨 素材成效（管理員）")
-    st.caption("兩階段素材分開呈現，日期範圍在側邊欄各自調整")
 
-    # 階段二：集資銷售期素材（用銷售 campaign，重點：購買 / CPA）
-    render_creative_block(
-        "🎯 集資銷售期素材成效",
-        start_str, end_str,
-        campaign_id=CAMPAIGN_ID,
-        focus="purchase",
-    )
-
-    st.divider()
+    # 銷售階段才顯示集資銷售期素材；純前測階段只顯示前測素材
+    if SALES_MODE:
+        st.caption("兩階段素材分開呈現，日期範圍在側邊欄各自調整")
+        # 階段二：集資銷售期素材（用銷售 campaign，重點：購買 / CPA）
+        render_creative_block(
+            "🎯 集資銷售期素材成效",
+            start_str, end_str,
+            campaign_id=CAMPAIGN_ID,
+            focus="purchase",
+        )
+        st.divider()
+    else:
+        st.caption("前測階段素材成效，日期範圍在側邊欄調整")
 
     # 階段一：前測期素材（用前測 campaign，重點：名單 / CPL）
     pretest_sheet_leads = count_sheet_leads(pre_start, pre_end)
@@ -690,7 +823,15 @@ if PAGE_MODE == "admin":
 
     st.stop()
 
-# ── 銷售期數據 ────────────────────────────────────────────────────────────────
+# ── 純前測階段（未設 TEACHIFY_API_KEY）────────────────────────────────────────
+
+if not SALES_MODE:
+    st.header("📋 前測期數據")
+    render_pretest_report(pre_start, pre_end, pre_start_str, pre_end_str)
+    st.caption("ℹ️ 目前為前測階段。設定 `TEACHIFY_API_KEY` 與 `SALES_START_DATE` 後，將自動切換為集資銷售階段報表。")
+    st.stop()
+
+# ── 銷售期數據（已設 TEACHIFY_API_KEY）────────────────────────────────────────
 
 st.header("📈 銷售期數據")
 
@@ -901,124 +1042,4 @@ else:
 st.divider()
 
 with st.expander(f"📂 前測期數據（{SALES_START_DATE} 前）— 點擊展開", expanded=False):
-    # 日期範圍沿用側邊欄的「前測期日期範圍」
-    st.caption(f"日期範圍：{pre_start_str} ~ {pre_end_str}（在側邊欄調整）")
-
-    pre_meta_df = fetch_meta_insights(
-        pre_start_str,
-        pre_end_str,
-        campaign_id=PRETEST_CAMPAIGN_ID,
-    )
-    pre_sheet_df = fetch_sheet_data()
-
-    pre_date_col = detect_date_column(pre_sheet_df) if not pre_sheet_df.empty else None
-    if pre_date_col and not pre_sheet_df.empty:
-        pre_sheet_df[pre_date_col] = parse_tw_datetime(pre_sheet_df[pre_date_col])
-        filtered_sheet = pre_sheet_df[
-            (pre_sheet_df[pre_date_col] >= pd.Timestamp(pre_start)) &
-            (pre_sheet_df[pre_date_col] <= pd.Timestamp(pre_end) + pd.Timedelta(days=1) - pd.Timedelta(seconds=1))
-        ]
-        pre_daily_leads = (
-            filtered_sheet.groupby(filtered_sheet[pre_date_col].dt.normalize())
-            .size().reset_index(name="leads")
-        ).rename(columns={pre_date_col: "date"})[["date", "leads"]]
-        pre_total_leads = int(filtered_sheet.shape[0])
-    else:
-        pre_total_leads = int(pre_sheet_df.shape[0]) if not pre_sheet_df.empty else 0
-        pre_daily_leads = pd.DataFrame()
-
-    pre_total_spend       = pre_meta_df["spend"].sum() if not pre_meta_df.empty else 0.0
-    pre_total_clicks      = int(pre_meta_df["clicks"].sum()) if not pre_meta_df.empty else 0
-    pre_total_impressions = int(pre_meta_df["impressions"].sum()) if not pre_meta_df.empty else 0
-    pre_avg_cpc           = (pre_total_spend / pre_total_clicks) if pre_total_clicks > 0 else 0.0
-    pre_cpl               = (pre_total_spend / pre_total_leads) if pre_total_leads > 0 else 0.0
-
-    p1, p2, p3, p4, p5, p6 = st.columns(6)
-    p1.metric("總花費",     fmt_currency(pre_total_spend))
-    p2.metric("總點擊數",   fmt_number(pre_total_clicks))
-    p3.metric("總曝光數",   fmt_number(pre_total_impressions))
-    p4.metric("平均 CPC",   f"NT$ {pre_avg_cpc:.2f}")
-    p5.metric("前測名單數", fmt_number(pre_total_leads))
-    p6.metric("名單成本",   fmt_currency(pre_cpl))
-
-    if not pre_meta_df.empty:
-        pre_chart = pre_meta_df.copy()
-        if not pre_daily_leads.empty:
-            pre_chart = pre_chart.merge(pre_daily_leads, on="date", how="left")
-            pre_chart["leads"] = pre_chart["leads"].fillna(0).astype(int)
-            pre_chart["cum_spend"] = pre_chart["spend"].cumsum()
-            pre_chart["cum_leads"] = pre_chart["leads"].cumsum()
-            pre_chart["daily_cost_per_lead"] = pre_chart.apply(
-                lambda r: r["cum_spend"] / r["cum_leads"] if r["cum_leads"] > 0 else None, axis=1
-            )
-        else:
-            pre_chart["daily_cost_per_lead"] = None
-
-        pre_fig = go.Figure()
-        pre_fig.add_trace(go.Bar(
-            x=pre_chart["date"], y=pre_chart["spend"],
-            name="每日花費 (NT$)", marker_color="#4C9BE8", yaxis="y1",
-            hovertemplate="%{x|%Y-%m-%d}<br>花費：NT$ %{y:,.0f}<extra></extra>",
-        ))
-        if pre_chart["daily_cost_per_lead"].notna().any():
-            pre_fig.add_trace(go.Scatter(
-                x=pre_chart["date"], y=pre_chart["daily_cost_per_lead"],
-                name="累積名單成本 (NT$)", mode="lines+markers",
-                line=dict(color="#FF6B6B", width=2), marker=dict(size=6), yaxis="y2",
-                hovertemplate="%{x|%Y-%m-%d}<br>名單成本：NT$ %{y:,.0f}<extra></extra>",
-            ))
-        pre_fig.update_layout(
-            xaxis=dict(title="日期", tickformat="%m/%d"),
-            yaxis=dict(title="每日花費 (NT$)", showgrid=False),
-            yaxis2=dict(title="累積名單成本 (NT$)", overlaying="y", side="right", showgrid=False),
-            legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1),
-            hovermode="x unified", height=380,
-            margin=dict(l=0, r=0, t=10, b=0),
-            plot_bgcolor="rgba(0,0,0,0)", paper_bgcolor="rgba(0,0,0,0)",
-        )
-        st.plotly_chart(pre_fig, use_container_width=True)
-
-        # ── 前測期每日明細表 ────────────────────────────────────────────────
-        st.markdown("**每日明細**")
-        pre_table = pre_meta_df.copy()
-        if not pre_daily_leads.empty:
-            pre_table = pre_table.merge(pre_daily_leads, on="date", how="left")
-            pre_table["leads"] = pre_table["leads"].fillna(0).astype(int)
-            pre_table["cost_per_lead"] = pre_table.apply(
-                lambda r: r["spend"] / r["leads"] if r["leads"] > 0 else None, axis=1
-            )
-        else:
-            pre_table["leads"] = 0
-            pre_table["cost_per_lead"] = None
-
-        pre_table["date_str"] = pre_table["date"].dt.strftime("%Y-%m-%d")
-
-        pre_totals = {
-            "date_str": "合計",
-            "spend": pre_total_spend,
-            "clicks": pre_total_clicks,
-            "impressions": pre_total_impressions,
-            "cpc": pre_avg_cpc,
-            "leads": pre_total_leads,
-            "cost_per_lead": pre_cpl if pre_total_leads > 0 else None,
-        }
-        pre_display = pd.concat(
-            [pre_table[["date_str", "spend", "clicks", "impressions", "cpc", "leads", "cost_per_lead"]],
-             pd.DataFrame([pre_totals])],
-            ignore_index=True,
-        )
-
-        def _fmt(v, fn):
-            return fn(v) if isinstance(v, (int, float)) and pd.notna(v) else "-"
-
-        pre_display["spend"]         = pre_display["spend"].apply(lambda v: _fmt(v, lambda x: f"NT$ {x:,.0f}"))
-        pre_display["clicks"]        = pre_display["clicks"].apply(lambda v: _fmt(v, lambda x: f"{int(x):,}"))
-        pre_display["impressions"]   = pre_display["impressions"].apply(lambda v: _fmt(v, lambda x: f"{int(x):,}"))
-        pre_display["cpc"]           = pre_display["cpc"].apply(lambda v: _fmt(v, lambda x: f"NT$ {x:.2f}"))
-        pre_display["leads"]         = pre_display["leads"].apply(lambda v: _fmt(v, lambda x: f"{int(x):,}"))
-        pre_display["cost_per_lead"] = pre_display["cost_per_lead"].apply(lambda v: _fmt(v, lambda x: f"NT$ {x:,.0f}"))
-
-        pre_display.columns = ["日期", "花費", "點擊", "曝光", "CPC", "名單數", "名單成本"]
-        st.dataframe(pre_display, use_container_width=True, hide_index=True)
-    else:
-        st.info("前測期間內無廣告數據")
+    render_pretest_report(pre_start, pre_end, pre_start_str, pre_end_str)
