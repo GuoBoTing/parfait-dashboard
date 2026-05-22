@@ -182,6 +182,7 @@ def fetch_meta_ad_insights(start_date: str, end_date: str, campaign_id: str = ""
     purchase_types = ["purchase", "offsite_conversion.fb_pixel_purchase",
                       "omni_purchase", "onsite_web_purchase"]
     lead_types     = ["lead", "offsite_conversion.fb_pixel_lead",
+                      "offsite_conversion.fb_pixel_custom",
                       "onsite_conversion.lead_grouped"]
     landing_types  = ["landing_page_view"]
 
