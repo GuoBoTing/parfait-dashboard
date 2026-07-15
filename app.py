@@ -527,7 +527,7 @@ def fetch_teachify_payments(start_ts: int, end_ts: int) -> pd.DataFrame:
           paidAt
           refundedAt
           tradeNo
-          lineitems { name amount }
+          lineitems { name itemName amount }
         }
       }
     }
@@ -555,12 +555,17 @@ def fetch_teachify_payments(start_ts: int, end_ts: int) -> pd.DataFrame:
 
     df = pd.DataFrame(all_rows)
 
-    # 商品過濾：只保留 lineitems 名稱含關鍵字的訂單（學校有多門課時使用）
+    # 商品過濾：只保留課程名（itemName）或方案名（name）含關鍵字的訂單
+    # （學校有多門課時使用；itemName 是完整課程標題，name 是方案名）
     if TEACHIFY_PRODUCT_FILTER:
         def _match_product(items):
             if not isinstance(items, list):
                 return False
-            return any(TEACHIFY_PRODUCT_FILTER in (it.get("name") or "") for it in items)
+            return any(
+                TEACHIFY_PRODUCT_FILTER in (it.get("itemName") or "")
+                or TEACHIFY_PRODUCT_FILTER in (it.get("name") or "")
+                for it in items
+            )
         df = df[df["lineitems"].apply(_match_product)]
         if df.empty:
             return pd.DataFrame()
