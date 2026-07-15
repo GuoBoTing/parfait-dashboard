@@ -40,6 +40,10 @@ SALES_START_DATE = _get_secret("SALES_START_DATE", date.today().strftime("%Y-%m-
 
 # Teachify Admin API
 TEACHIFY_API_KEY = _get_secret("TEACHIFY_API_KEY", "")
+
+# 商品過濾關鍵字（選填）：同一個 Teachify 學校有多門課程在賣時，
+# 只計入 lineitems 名稱包含此關鍵字的訂單。不設 = 全部訂單都計入。
+TEACHIFY_PRODUCT_FILTER = _get_secret("TEACHIFY_PRODUCT_FILTER", "")
 TEACHIFY_GRAPHQL = "https://teachify.io/admin/graphql"
 
 # ── 模式開關 ──────────────────────────────────────────────────────────────────
@@ -550,6 +554,17 @@ def fetch_teachify_payments(start_ts: int, end_ts: int) -> pd.DataFrame:
         return pd.DataFrame()
 
     df = pd.DataFrame(all_rows)
+
+    # 商品過濾：只保留 lineitems 名稱含關鍵字的訂單（學校有多門課時使用）
+    if TEACHIFY_PRODUCT_FILTER:
+        def _match_product(items):
+            if not isinstance(items, list):
+                return False
+            return any(TEACHIFY_PRODUCT_FILTER in (it.get("name") or "") for it in items)
+        df = df[df["lineitems"].apply(_match_product)]
+        if df.empty:
+            return pd.DataFrame()
+
     df["paidAt_dt"] = pd.to_datetime(df["paidAt"], unit="s")
     df["date"] = df["paidAt_dt"].dt.normalize()
     df["amount"] = df["amount"].astype(float)
