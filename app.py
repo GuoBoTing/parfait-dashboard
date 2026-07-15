@@ -44,6 +44,10 @@ TEACHIFY_API_KEY = _get_secret("TEACHIFY_API_KEY", "")
 # 商品過濾關鍵字（選填）：同一個 Teachify 學校有多門課程在賣時，
 # 只計入 lineitems 名稱包含此關鍵字的訂單。不設 = 全部訂單都計入。
 TEACHIFY_PRODUCT_FILTER = _get_secret("TEACHIFY_PRODUCT_FILTER", "")
+
+# 折扣碼過濾關鍵字（選填）：折扣碼明細表只顯示 code 或名稱包含此關鍵字的
+# 折扣碼（不分大小寫）。不設 = 顯示學校全部折扣碼。
+TEACHIFY_COUPON_FILTER = _get_secret("TEACHIFY_COUPON_FILTER", "")
 TEACHIFY_GRAPHQL = "https://teachify.io/admin/graphql"
 
 # ── 模式開關 ──────────────────────────────────────────────────────────────────
@@ -608,6 +612,15 @@ def fetch_teachify_coupons() -> pd.DataFrame:
     if not all_rows:
         return pd.DataFrame()
     df = pd.DataFrame(all_rows)
+
+    # 折扣碼過濾：只保留 code 或名稱含關鍵字者（不分大小寫）
+    if TEACHIFY_COUPON_FILTER:
+        kw = TEACHIFY_COUPON_FILTER.lower()
+        mask = (
+            df["code"].fillna("").str.lower().str.contains(kw, regex=False)
+            | df["name"].fillna("").str.lower().str.contains(kw, regex=False)
+        )
+        df = df[mask]
     return df
 
 
