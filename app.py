@@ -105,31 +105,38 @@ def inspect_token(token: str) -> dict:
 
 # ── Meta 廣告 ─────────────────────────────────────────────────────────────────
 
+def _split_ids(ids: str) -> list[str]:
+    """CAMPAIGN_ID 支援逗號分隔多組活動 ID。"""
+    return [x.strip() for x in ids.split(",") if x.strip()]
+
+
 @st.cache_data(ttl=300, show_spinner=False)
 def fetch_meta_insights(start_date: str, end_date: str, campaign_id: str = "") -> pd.DataFrame:
+    """抓每日 insights。campaign_id 可為逗號分隔的多組活動，會加總合併。"""
     token = get_access_token()
     if not token:
         return pd.DataFrame()
 
-    cid = campaign_id or CAMPAIGN_ID
-    url = f"https://graph.facebook.com/v19.0/{cid}/insights"
-    params = {
-        "fields": "spend,clicks,impressions,cpc",
-        "time_range": f'{{"since":"{start_date}","until":"{end_date}"}}',
-        "time_increment": 1,
-        "limit": 500,
-        "access_token": token,
-    }
     rows = []
-    while url:
-        resp = requests.get(url, params=params if rows == [] else None)
-        data = resp.json()
-        if "error" in data:
-            st.error(f"Meta API 錯誤：{data['error'].get('message', data['error'])}")
-            break
-        rows.extend(data.get("data", []))
-        url = data.get("paging", {}).get("next")
-        params = None  # next page URL already contains params
+    for cid in _split_ids(campaign_id or CAMPAIGN_ID):
+        url = f"https://graph.facebook.com/v19.0/{cid}/insights"
+        params = {
+            "fields": "spend,clicks,impressions",
+            "time_range": f'{{"since":"{start_date}","until":"{end_date}"}}',
+            "time_increment": 1,
+            "limit": 500,
+            "access_token": token,
+        }
+        first = True
+        while url:
+            resp = requests.get(url, params=params if first else None)
+            first = False
+            data = resp.json()
+            if "error" in data:
+                st.error(f"Meta API 錯誤（{cid}）：{data['error'].get('message', data['error'])}")
+                break
+            rows.extend(data.get("data", []))
+            url = data.get("paging", {}).get("next")
 
     if not rows:
         return pd.DataFrame()
@@ -139,7 +146,13 @@ def fetch_meta_insights(start_date: str, end_date: str, campaign_id: str = "") -
     df["spend"] = df["spend"].astype(float)
     df["clicks"] = df["clicks"].astype(int)
     df["impressions"] = df["impressions"].astype(int)
-    df["cpc"] = df["cpc"].astype(float)
+
+    # 多活動同日資料加總，CPC 重新計算
+    df = (
+        df.groupby("date", as_index=False)
+        .agg(spend=("spend", "sum"), clicks=("clicks", "sum"), impressions=("impressions", "sum"))
+    )
+    df["cpc"] = df.apply(lambda r: r["spend"] / r["clicks"] if r["clicks"] > 0 else 0.0, axis=1)
     return df[["date", "spend", "clicks", "impressions", "cpc"]].sort_values("date")
 
 
@@ -150,25 +163,26 @@ def fetch_meta_ad_insights(start_date: str, end_date: str, campaign_id: str = ""
     if not token:
         return pd.DataFrame()
 
-    cid = campaign_id or CAMPAIGN_ID
-    url = f"https://graph.facebook.com/v19.0/{cid}/insights"
-    params = {
-        "level": "ad",
-        "fields": "ad_id,ad_name,adset_id,adset_name,spend,impressions,clicks,ctr,cpc,cpm,reach,frequency,actions,cost_per_action_type",
-        "time_range": f'{{"since":"{start_date}","until":"{end_date}"}}',
-        "limit": 500,
-        "access_token": token,
-    }
     rows = []
-    while url:
-        resp = requests.get(url, params=params if rows == [] else None)
-        data = resp.json()
-        if "error" in data:
-            st.error(f"Meta API 錯誤（素材成效）：{data['error'].get('message', data['error'])}")
-            break
-        rows.extend(data.get("data", []))
-        url = data.get("paging", {}).get("next")
-        params = None
+    for cid in _split_ids(campaign_id or CAMPAIGN_ID):
+        url = f"https://graph.facebook.com/v19.0/{cid}/insights"
+        params = {
+            "level": "ad",
+            "fields": "ad_id,ad_name,adset_id,adset_name,spend,impressions,clicks,ctr,cpc,cpm,reach,frequency,actions,cost_per_action_type",
+            "time_range": f'{{"since":"{start_date}","until":"{end_date}"}}',
+            "limit": 500,
+            "access_token": token,
+        }
+        first = True
+        while url:
+            resp = requests.get(url, params=params if first else None)
+            first = False
+            data = resp.json()
+            if "error" in data:
+                st.error(f"Meta API 錯誤（素材成效 {cid}）：{data['error'].get('message', data['error'])}")
+                break
+            rows.extend(data.get("data", []))
+            url = data.get("paging", {}).get("next")
 
     if not rows:
         return pd.DataFrame()
@@ -527,6 +541,7 @@ def fetch_teachify_payments(start_ts: int, end_ts: int) -> pd.DataFrame:
           id
           amount
           discountAmount
+          refundedAmount
           couponCode
           paidAt
           refundedAt
@@ -578,7 +593,13 @@ def fetch_teachify_payments(start_ts: int, end_ts: int) -> pd.DataFrame:
     df["date"] = df["paidAt_dt"].dt.normalize()
     df["amount"] = df["amount"].astype(float)
     df["discountAmount"] = df["discountAmount"].fillna(0).astype(float)
+    df["refundedAmount"] = df["refundedAmount"].fillna(0).astype(float)
     df["used_coupon"] = df["couponCode"].notna() & (df["couponCode"] != "")
+
+    # 退款處理：淨額 = 金額 - 已退款；全額退款的訂單不計入銷售組數
+    df["amount_net"] = df["amount"] - df["refundedAmount"]
+    df["fully_refunded"] = (df["refundedAmount"] > 0) & (df["refundedAmount"] >= df["amount"])
+    df["is_active_order"] = (~df["fully_refunded"]).astype(int)
     return df
 
 
@@ -896,11 +917,14 @@ total_clicks      = int(meta_df["clicks"].sum()) if not meta_df.empty else 0
 total_impressions = int(meta_df["impressions"].sum()) if not meta_df.empty else 0
 avg_cpc           = (total_spend / total_clicks) if total_clicks > 0 else 0.0
 
-total_orders   = int(payments_df.shape[0]) if not payments_df.empty else 0
-total_revenue  = float(payments_df["amount"].sum()) if not payments_df.empty else 0.0
-coupon_orders  = int(payments_df["used_coupon"].sum()) if not payments_df.empty else 0
-cost_per_order = (total_spend / total_orders) if total_orders > 0 else 0.0
-roas           = (total_revenue / total_spend) if total_spend > 0 else 0.0
+# 銷售組數不含全額退款訂單；銷售金額 = 淨額（已扣除退款）
+total_orders    = int(payments_df["is_active_order"].sum()) if not payments_df.empty else 0
+total_revenue   = float(payments_df["amount_net"].sum()) if not payments_df.empty else 0.0
+total_refunded  = float(payments_df["refundedAmount"].sum()) if not payments_df.empty else 0.0
+refunded_orders = int(payments_df["fully_refunded"].sum()) if not payments_df.empty else 0
+coupon_orders   = int(payments_df.loc[payments_df["is_active_order"] == 1, "used_coupon"].sum()) if not payments_df.empty else 0
+cost_per_order  = (total_spend / total_orders) if total_orders > 0 else 0.0
+roas            = (total_revenue / total_spend) if total_spend > 0 else 0.0
 
 # KPI 卡片
 c1, c2, c3, c4 = st.columns(4)
@@ -915,6 +939,9 @@ c6.metric("點擊數",         fmt_number(total_clicks))
 c7.metric("平均 CPC",       f"NT$ {avg_cpc:.2f}")
 c8.metric("每筆訂單成本",   fmt_currency(cost_per_order) if total_orders > 0 else "-")
 
+if total_refunded > 0:
+    st.caption(f"↩️ 已扣除退款 {fmt_currency(total_refunded)}（全額退款 {refunded_orders} 筆不計入銷售組數）")
+
 st.divider()
 
 # ── 銷售趨勢圖 ────────────────────────────────────────────────────────────────
@@ -926,7 +953,7 @@ if not meta_df.empty:
     if not payments_df.empty:
         daily_sales = (
             payments_df.groupby("date")
-            .agg(orders=("id", "count"), revenue=("amount", "sum"))
+            .agg(orders=("is_active_order", "sum"), revenue=("amount_net", "sum"))
             .reset_index()
         )
     else:
@@ -1016,11 +1043,19 @@ st.subheader("每日銷售明細")
 if not meta_df.empty:
     table_df = meta_df.copy()
     if not payments_df.empty:
+        active_df = payments_df[payments_df["is_active_order"] == 1]
         daily_sales = (
             payments_df.groupby("date")
-            .agg(orders=("id", "count"), revenue=("amount", "sum"), coupon_used=("used_coupon", "sum"))
+            .agg(orders=("is_active_order", "sum"), revenue=("amount_net", "sum"))
             .reset_index()
         )
+        daily_coupons = (
+            active_df.groupby("date")
+            .agg(coupon_used=("used_coupon", "sum"))
+            .reset_index()
+        )
+        daily_sales = daily_sales.merge(daily_coupons, on="date", how="left")
+        daily_sales["coupon_used"] = daily_sales["coupon_used"].fillna(0)
         table_df = table_df.merge(daily_sales, on="date", how="left")
     else:
         table_df["orders"] = 0
