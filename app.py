@@ -666,9 +666,18 @@ def parse_tw_datetime(series: pd.Series) -> pd.Series:
     return series.apply(_parse)
 
 def detect_date_column(df: pd.DataFrame):
-    """回傳 DataFrame 中最可能是日期/時間戳記的欄位名稱"""
-    for col in df.columns:
-        if any(kw in col for kw in ["時間", "日期", "Timestamp", "timestamp", "Submitted", "submitted", "date", "Date"]):
+    """回傳 DataFrame 中最可能是日期/時間戳記的欄位名稱。
+
+    問卷題目可能剛好含「時間」等關鍵字（例如「一週花多少時間…」），
+    所以除了欄名關鍵字，還會實際解析欄位值，只回傳真的能解析出時間的欄位。
+    """
+    keywords = ["Submitted", "submitted", "Timestamp", "timestamp",
+                "時間戳記", "時間", "日期", "date", "Date"]
+    candidates = [col for col in df.columns
+                  if any(kw in col for kw in keywords)]
+    for col in candidates:
+        parsed = parse_tw_datetime(df[col].head(20))
+        if parsed.notna().any():
             return col
     return None
 
