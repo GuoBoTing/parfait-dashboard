@@ -488,15 +488,22 @@ def render_pretest_report(pre_start, pre_end, pre_start_str, pre_end_str):
 
 # ── Google Sheet（前測期名單）────────────────────────────────────────────────
 
-def _fetch_csv(url: str, label: str) -> pd.DataFrame:
-    try:
-        import io
-        resp = requests.get(url, verify=False, timeout=15)
-        resp.raise_for_status()
-        return pd.read_csv(io.BytesIO(resp.content), encoding="utf-8-sig")
-    except Exception as e:
-        st.warning(f"無法讀取 Google Sheet（{label}）：{e}")
-        return pd.DataFrame()
+def _fetch_csv(url: str, label: str, retries: int = 3) -> pd.DataFrame:
+    """讀取 Google Sheet CSV。Google 匯出偶爾回應慢，逾時會自動重試。"""
+    import io
+    import time as _time
+    last_err = None
+    for attempt in range(1, retries + 1):
+        try:
+            resp = requests.get(url, verify=False, timeout=30)
+            resp.raise_for_status()
+            return pd.read_csv(io.BytesIO(resp.content), encoding="utf-8-sig")
+        except Exception as e:
+            last_err = e
+            if attempt < retries:
+                _time.sleep(2 * attempt)  # 2s, 4s 後退重試
+    st.warning(f"無法讀取 Google Sheet（{label}，已重試 {retries} 次）：{last_err}")
+    return pd.DataFrame()
 
 
 @st.cache_data(ttl=300, show_spinner=False)
