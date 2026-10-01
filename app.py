@@ -944,7 +944,8 @@ coupon_orders   = int(payments_df.loc[payments_df["is_active_order"] == 1, "used
 cost_per_order  = (total_spend / total_orders) if total_orders > 0 else 0.0
 roas            = (total_revenue / total_spend) if total_spend > 0 else 0.0
 
-# KPI 卡片
+# KPI 卡片 — 銷售期（不含前測廣告花費）
+st.markdown("**銷售期成效（不含前測廣告花費）**")
 c1, c2, c3, c4 = st.columns(4)
 c1.metric("銷售組數",       fmt_number(total_orders))
 c2.metric("銷售金額",       fmt_currency(total_revenue))
@@ -959,6 +960,21 @@ c8.metric("每筆訂單成本",   fmt_currency(cost_per_order) if total_orders >
 
 if total_refunded > 0:
     st.caption(f"↩️ 已扣除退款 {fmt_currency(total_refunded)}（全額退款 {refunded_orders} 筆不計入銷售組數）")
+
+# 總體成效 — 含前測期廣告花費（前測範圍依側邊欄「前測期日期範圍」）
+pretest_spend_df = fetch_meta_insights(pre_start_str, pre_end_str, campaign_id=PRETEST_CAMPAIGN_ID)
+pretest_spend = float(pretest_spend_df["spend"].sum()) if not pretest_spend_df.empty else 0.0
+combined_spend = total_spend + pretest_spend
+combined_roas = (total_revenue / combined_spend) if combined_spend > 0 else 0.0
+combined_cpo  = (combined_spend / total_orders) if total_orders > 0 else 0.0
+
+st.markdown("**總體成效（含前測廣告花費）**")
+g1, g2, g3, g4 = st.columns(4)
+g1.metric("前測期廣告花費", fmt_currency(pretest_spend))
+g2.metric("總廣告花費（前測＋銷售）", fmt_currency(combined_spend))
+g3.metric("ROAS（含前測）", f"{combined_roas:.2f}x" if combined_spend > 0 else "-")
+g4.metric("每筆訂單成本（含前測）", fmt_currency(combined_cpo) if total_orders > 0 else "-")
+st.caption(f"前測花費計算範圍：{pre_start_str} ~ {pre_end_str}（在側邊欄「前測期日期範圍」調整）")
 
 st.divider()
 
