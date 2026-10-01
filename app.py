@@ -39,7 +39,9 @@ PRETEST_AD_ACCOUNT_ID = _get_secret("PRETEST_AD_ACCOUNT_ID", AD_ACCOUNT_ID)  # �
 SALES_START_DATE = _get_secret("SALES_START_DATE", date.today().strftime("%Y-%m-%d"))
 
 # Teachify Admin API
-TEACHIFY_API_KEY = _get_secret("TEACHIFY_API_KEY", "")
+# NFKC 正規化：把誤貼的全形字元轉回半形（HTTP header 只接受 ASCII），並去除前後空白
+import unicodedata as _ud
+TEACHIFY_API_KEY = _ud.normalize("NFKC", _get_secret("TEACHIFY_API_KEY", "")).strip()
 
 # 商品過濾關鍵字（選填）：同一個 Teachify 學校有多門課程在賣時，
 # 只計入 lineitems 名稱包含此關鍵字的訂單。不設 = 全部訂單都計入。
