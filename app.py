@@ -757,7 +757,10 @@ with st.sidebar:
 
     # 銷售期日期範圍：僅在銷售階段顯示
     if SALES_MODE:
-        sales_min_pickable = full_df["date"].min().date() if not full_df.empty else (sales_start - timedelta(days=30))
+        # 最早可選日：活動數據最早日與 SALES_START_DATE 取較早者
+        # （活動可能晚於開賣日才起跑，仍要能選到開賣日）
+        _data_min = full_df["date"].min().date() if not full_df.empty else (sales_start - timedelta(days=30))
+        sales_min_pickable = min(_data_min, sales_start) if sales_start <= today else _data_min
         sales_default_start = max(sales_start, sales_min_pickable) if sales_start <= today else sales_min_pickable
         date_range = st.date_input(
             "銷售期日期範圍",
