@@ -985,7 +985,16 @@ st.divider()
 
 st.subheader("每日銷售與廣告花費")
 
-if not meta_df.empty:
+# 以「所選日期範圍」為基底，廣告未投放的日子補 0，
+# 避免有銷售但無廣告數據的日期（例如開賣日早於廣告起跑日）從圖表/明細消失
+meta_daily = pd.DataFrame({"date": pd.date_range(start, end)})
+meta_daily = meta_daily.merge(meta_df, on="date", how="left")
+meta_daily["spend"]       = meta_daily["spend"].fillna(0.0) if "spend" in meta_daily.columns else 0.0
+meta_daily["cpc"]         = meta_daily["cpc"].fillna(0.0) if "cpc" in meta_daily.columns else 0.0
+for _c in ["clicks", "impressions"]:
+    meta_daily[_c] = (meta_daily[_c].fillna(0).astype(int) if _c in meta_daily.columns else 0)
+
+if not meta_daily.empty:
     # 每日銷售統計
     if not payments_df.empty:
         daily_sales = (
@@ -996,7 +1005,7 @@ if not meta_df.empty:
     else:
         daily_sales = pd.DataFrame(columns=["date", "orders", "revenue"])
 
-    chart_df = meta_df.copy()
+    chart_df = meta_daily.copy()
     chart_df = chart_df.merge(daily_sales, on="date", how="left")
     chart_df["orders"]  = chart_df["orders"].fillna(0).astype(int)
     chart_df["revenue"] = chart_df["revenue"].fillna(0).astype(float)
@@ -1077,8 +1086,8 @@ st.divider()
 
 st.subheader("每日銷售明細")
 
-if not meta_df.empty:
-    table_df = meta_df.copy()
+if not meta_daily.empty:
+    table_df = meta_daily.copy()
     if not payments_df.empty:
         active_df = payments_df[payments_df["is_active_order"] == 1]
         daily_sales = (
