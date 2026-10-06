@@ -1041,7 +1041,8 @@ st.subheader("每日銷售與廣告花費")
 # 以「所選日期範圍」為基底，廣告未投放的日子補 0，
 # 避免有銷售但無廣告數據的日期（例如開賣日早於廣告起跑日）從圖表/明細消失
 meta_daily = pd.DataFrame({"date": pd.date_range(start, end)})
-meta_daily = meta_daily.merge(meta_df, on="date", how="left")
+if not meta_df.empty:
+    meta_daily = meta_daily.merge(meta_df, on="date", how="left")
 meta_daily["spend"]       = meta_daily["spend"].fillna(0.0) if "spend" in meta_daily.columns else 0.0
 meta_daily["cpc"]         = meta_daily["cpc"].fillna(0.0) if "cpc" in meta_daily.columns else 0.0
 for _c in ["clicks", "impressions"]:
