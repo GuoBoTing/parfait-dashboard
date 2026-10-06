@@ -375,23 +375,15 @@ def render_pretest_report(pre_start, pre_end, pre_start_str, pre_end_str):
     st.caption(f"日期範圍：{pre_start_str} ~ {pre_end_str}（在側邊欄調整）")
 
     pre_meta_df = fetch_meta_insights(pre_start_str, pre_end_str, campaign_id=PRETEST_CAMPAIGN_ID)
-    pre_sheet_df = fetch_sheet_data()
 
-    pre_date_col = detect_date_column(pre_sheet_df) if not pre_sheet_df.empty else None
-    if pre_date_col and not pre_sheet_df.empty:
-        pre_sheet_df[pre_date_col] = parse_tw_datetime(pre_sheet_df[pre_date_col])
-        filtered_sheet = pre_sheet_df[
-            (pre_sheet_df[pre_date_col] >= pd.Timestamp(pre_start)) &
-            (pre_sheet_df[pre_date_col] <= pd.Timestamp(pre_end) + pd.Timedelta(days=1) - pd.Timedelta(seconds=1))
-        ]
-        pre_daily_leads = (
-            filtered_sheet.groupby(filtered_sheet[pre_date_col].dt.normalize())
-            .size().reset_index(name="leads")
-        ).rename(columns={pre_date_col: "date"})[["date", "leads"]]
-        pre_total_leads = int(filtered_sheet.shape[0])
+    daily_all, undated_leads = fetch_daily_leads()
+    if not daily_all.empty:
+        mask = (daily_all["date"] >= pd.Timestamp(pre_start)) & (daily_all["date"] <= pd.Timestamp(pre_end))
+        pre_daily_leads = daily_all[mask][["date", "leads"]].copy()
+        pre_total_leads = int(pre_daily_leads["leads"].sum()) + undated_leads
     else:
-        pre_total_leads = int(pre_sheet_df.shape[0]) if not pre_sheet_df.empty else 0
         pre_daily_leads = pd.DataFrame()
+        pre_total_leads = undated_leads
 
     pre_total_spend       = pre_meta_df["spend"].sum() if not pre_meta_df.empty else 0.0
     pre_total_clicks      = int(pre_meta_df["clicks"].sum()) if not pre_meta_df.empty else 0
@@ -518,6 +510,72 @@ def fetch_sheet_data() -> pd.DataFrame:
     if not frames:
         return pd.DataFrame()
     return pd.concat(frames, ignore_index=True)
+
+
+def _normalize_sheet_to_daily(df: pd.DataFrame):
+    """把單一 Sheet 轉成 (date, leads) 每日名單。支援兩種格式：
+
+    A. 每日彙總表：有「日期」與「名單數」欄（一列 = 一天的加總）
+       → 直接取名單數；日期支援 YYYY/M/D 或 M/D（無年份視為今年，未來日期回推一年）
+    B. 一列一筆名單：有可解析的時間戳記欄 → 依日計數
+    回傳 None 代表找不到日期欄（整張表當作「無日期名單」計入總數）。
+    """
+    if df.empty:
+        return pd.DataFrame(columns=["date", "leads"])
+
+    if "名單數" in df.columns and "日期" in df.columns:
+        today = tw_today()
+
+        def _parse_md(v):
+            s = str(v).strip()
+            for fmt in ("%Y/%m/%d", "%Y-%m-%d", "%m/%d", "%m-%d"):
+                try:
+                    dt = datetime.strptime(s, fmt)
+                    if fmt in ("%m/%d", "%m-%d"):
+                        dt = dt.replace(year=today.year)
+                        if dt.date() > today + timedelta(days=7):
+                            dt = dt.replace(year=today.year - 1)
+                    return pd.Timestamp(dt.date())
+                except Exception:
+                    continue
+            return pd.NaT
+
+        out = pd.DataFrame({
+            "date": df["日期"].apply(_parse_md),
+            "leads": pd.to_numeric(df["名單數"], errors="coerce").fillna(0).astype(int),
+        }).dropna(subset=["date"])
+        return out[["date", "leads"]]
+
+    col = detect_date_column(df)
+    if not col:
+        return None
+    parsed = parse_tw_datetime(df[col])
+    tmp = pd.DataFrame({"date": parsed.dt.normalize()}).dropna()
+    if tmp.empty:
+        return pd.DataFrame(columns=["date", "leads"])
+    return tmp.groupby("date").size().reset_index(name="leads")
+
+
+@st.cache_data(ttl=300, show_spinner=False)
+def fetch_daily_leads():
+    """合併所有 Sheet 的每日名單。回傳 (daily_df, undated_count)。"""
+    daily_frames, undated = [], 0
+    for i, url in enumerate(SHEET_CSV_URLS, 1):
+        df = _fetch_csv(url, f"第 {i} 份")
+        if df.empty:
+            continue
+        norm = _normalize_sheet_to_daily(df)
+        if norm is None:
+            undated += int(df.shape[0])
+            continue
+        if not norm.empty:
+            daily_frames.append(norm)
+    if daily_frames:
+        daily = pd.concat(daily_frames, ignore_index=True).groupby("date", as_index=False)["leads"].sum()
+        daily = daily.sort_values("date")
+    else:
+        daily = pd.DataFrame(columns=["date", "leads"])
+    return daily, undated
 
 
 # ── Teachify Admin API ────────────────────────────────────────────────────────
@@ -851,17 +909,12 @@ pre_end_str   = pre_end.strftime("%Y-%m-%d")
 
 
 def count_sheet_leads(start_d, end_d) -> int:
-    """計算指定日期範圍內 Google Sheet 的名單數。"""
-    sdf = fetch_sheet_data()
-    if sdf.empty:
-        return 0
-    col = detect_date_column(sdf)
-    if not col:
-        return int(sdf.shape[0])
-    parsed = parse_tw_datetime(sdf[col])
-    mask = (parsed >= pd.Timestamp(start_d)) & \
-           (parsed <= pd.Timestamp(end_d) + pd.Timedelta(days=1) - pd.Timedelta(seconds=1))
-    return int(mask.sum())
+    """計算指定日期範圍內 Google Sheet 的名單數（支援彙總表與逐筆名單）。"""
+    daily, undated = fetch_daily_leads()
+    if daily.empty:
+        return undated
+    mask = (daily["date"] >= pd.Timestamp(start_d)) & (daily["date"] <= pd.Timestamp(end_d))
+    return int(daily[mask]["leads"].sum()) + undated
 
 
 # ── 頁面路由 ──────────────────────────────────────────────────────────────────
