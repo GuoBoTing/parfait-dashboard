@@ -656,7 +656,12 @@ def fetch_teachify_payments(start_ts: int, end_ts: int) -> pd.DataFrame:
         if df.empty:
             return pd.DataFrame()
 
-    df["paidAt_dt"] = pd.to_datetime(df["paidAt"], unit="s")
+    # paidAt 是 UTC 時間戳，必須轉台灣時區再切日期（否則跨日訂單會歸錯天）
+    df["paidAt_dt"] = (
+        pd.to_datetime(df["paidAt"], unit="s", utc=True)
+        .dt.tz_convert("Asia/Taipei")
+        .dt.tz_localize(None)
+    )
     df["date"] = df["paidAt_dt"].dt.normalize()
     df["amount"] = df["amount"].astype(float)
     df["discountAmount"] = df["discountAmount"].fillna(0).astype(float)
@@ -972,8 +977,9 @@ with st.spinner("載入廣告數據..."):
     meta_df = fetch_meta_insights(start_str, end_str)
 
 # Teachify 訂單（依日期過濾）
-start_ts = int(datetime.combine(start, datetime.min.time()).timestamp())
-end_ts   = int(datetime.combine(end, datetime.max.time()).timestamp())
+# 以台灣時區的一天為界（伺服器跑在 UTC，不指定時區會差 8 小時）
+start_ts = int(datetime.combine(start, datetime.min.time(), tzinfo=TW_TZ).timestamp())
+end_ts   = int(datetime.combine(end, datetime.max.time(), tzinfo=TW_TZ).timestamp())
 
 if not TEACHIFY_API_KEY:
     st.warning("⚠️ 尚未設定 `TEACHIFY_API_KEY` 環境變數，銷售資料無法載入。請到 Zeabur Variables 設定。")
