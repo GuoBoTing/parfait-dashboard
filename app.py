@@ -812,7 +812,7 @@ with st.sidebar:
     st.divider()
 
     # 先抓全期 Meta 資料以取得可用日期範圍
-    earliest = tw_today() - timedelta(days=37 * 30)
+    earliest = tw_today() - timedelta(days=36 * 30)  # Meta 上限 37 個月，取 36 保守避免踩線
     today = tw_today()
     yesterday = today - timedelta(days=1)
     with st.spinner("載入日期範圍..."):
@@ -842,7 +842,7 @@ with st.sidebar:
     # 前測期日期範圍
     # 銷售階段：上限為 sales_start 前一天；純前測階段：上限為今天
     pretest_end_default = (sales_start - timedelta(days=1)) if SALES_MODE else today
-    _pretest_earliest = pretest_end_default - timedelta(days=37 * 30)
+    _pretest_earliest = pretest_end_default - timedelta(days=36 * 30)  # Meta 上限 37 個月，取 36 保守避免踩線
     with st.spinner("載入前測日期範圍..."):
         pretest_full = fetch_meta_insights(
             _pretest_earliest.strftime("%Y-%m-%d"),
