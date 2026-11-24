@@ -847,7 +847,11 @@ with st.sidebar:
     # 前測期日期範圍
     # 銷售階段：上限為 sales_start 前一天；純前測階段：上限為今天
     pretest_end_default = (sales_start - timedelta(days=1)) if SALES_MODE else today
-    _pretest_earliest = pretest_end_default - timedelta(days=36 * 30)  # Meta 上限 37 個月，取 36 保守避免踩線
+    # Meta 的查詢下限是「今天往前 37 個月」的滾動視窗，
+    # 起始日必須以今天為錨點取下限，否則錨在過去日期遲早會踩線（#3018）
+    _meta_floor = today - timedelta(days=36 * 30)
+    _pretest_earliest = max(pretest_end_default - timedelta(days=36 * 30), _meta_floor)
+    _pretest_earliest = min(_pretest_earliest, pretest_end_default)  # 保證 start <= end
     with st.spinner("載入前測日期範圍..."):
         pretest_full = fetch_meta_insights(
             _pretest_earliest.strftime("%Y-%m-%d"),
