@@ -583,16 +583,21 @@ def fetch_daily_leads():
 def _teachify_query(query: str, variables: dict | None = None) -> dict:
     if not TEACHIFY_API_KEY:
         return {"errors": [{"message": "尚未設定 TEACHIFY_API_KEY"}]}
-    resp = requests.post(
-        TEACHIFY_GRAPHQL,
-        headers={
-            "X-Teachify-API-Key": TEACHIFY_API_KEY,
-            "Content-Type": "application/json",
-        },
-        json={"query": query, "variables": variables or {}},
-        timeout=30,
-    )
-    return resp.json()
+    # 連線層例外（DNS 失效、逾時、斷線）不讓整個 app 崩潰，
+    # 回傳 errors 讓呼叫端顯示警告、其餘數據照常呈現
+    try:
+        resp = requests.post(
+            TEACHIFY_GRAPHQL,
+            headers={
+                "X-Teachify-API-Key": TEACHIFY_API_KEY,
+                "Content-Type": "application/json",
+            },
+            json={"query": query, "variables": variables or {}},
+            timeout=30,
+        )
+        return resp.json()
+    except Exception as e:
+        return {"errors": [{"message": f"無法連線 Teachify API：{type(e).__name__}（服務可能暫時中斷）"}]}
 
 
 @st.cache_data(ttl=300, show_spinner=False)
